@@ -1,0 +1,102 @@
+&SGS_TKE
+dosmagor = .false.
+/
+
+&SLM
+landtype0 = 16,
+LAI0      = 0 
+/
+
+&PARAMETERS
+
+caseid = '',
+caseid_restart = '',
+case_restart = 'FWRCE',
+nrestart = 0,
+
+OCEAN        = .true.,
+LAND         = .false.,
+SLM          = .false.,
+dosfcforcing = .false.,
+
+ocean_type	 = 0,
+tabs_s       = 308,
+delta_sst	 = 0.,
+nxco2        = 1.,
+
+timesimpleocean = 0.,
+dodynamicocean = .false.,
+dossthomo = .true.,
+depth_slab_ocean = 0.5,
+Szero = -107.5,
+r_stomata = 0.,
+
+sst_ft = .false.,
+p_low = 400.,
+p_upp = 600.,
+tau_sst = 21600.,
+
+LES_S = .false.,
+
+dosgs           = .true.,
+dodamping       = .true.,
+doupperbound    = .true.,
+docloud         = .true.,
+doprecip        = .true.,
+docoriolis      = .false.,
+
+dolongwave      = .true.,
+doshortwave     = .true.,
+dosurface       = .true.,
+dolargescale    = .false.,
+doradforcing    = .false.,
+SFC_FLX_FXD     = .false.,
+SFC_TAU_FXD     = .false.,
+
+donudging_uv    = .false.,
+donudging_tq    = .false.,
+tauls           = 7200.,
+
+doperpetual = .true.,
+dosolarconstant = .true.,
+
+solar_constant = 565,
+zenith_angle   = 42.332,
+
+longitude0 = -90.,
+latitude0 =  0.,
+
+dx =    1000.,
+dy =    1000.,
+
+dt =    10.,
+nrad = 30,
+
+doradlon = .false.,
+doradlat = .false.,
+
+day0 = 0.,
+doseasons = .false.,
+
+nstop = 345600,
+nprint     = 180,
+nstat      = 360,
+nstatfrq   = 60,
+nelapsemin = 420, 
+
+doSAMconditionals = .false.,
+dosatupdnconditionals = .false.,
+
+nsave3D = 1080,
+nsave3Dstart    = 999999999,
+nsave3Dend      = 999999999,
+save3Dbin      = .false.,
+rad3Dout  = .true.,
+save3Davg = .false.,
+
+nsave2D = 1080,
+nsave2Dstart    = 999999999,
+nsave2Dend      = 999999999,
+save2Dbin       = .false.,
+save2Davg       = .false.
+/

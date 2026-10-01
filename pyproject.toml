@@ -1,0 +1,19 @@
+[project]
+name = "samheat"
+version = "0.1.0"
+description = "Launch and analyse SAM FWRCE experiments (van der Drift & O'Gorman 2025 and heat extremes)"
+requires-python = ">=3.9"
+dependencies = ["numpy", "xarray", "netCDF4", "pandas", "matplotlib"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["samheat*"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]

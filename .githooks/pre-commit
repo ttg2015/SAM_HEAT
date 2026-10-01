@@ -1,0 +1,13 @@
+#!/bin/sh
+# Block commits containing any staged file larger than 5 MB.
+MAX=5242880
+bad=0
+for f in $(git diff --cached --name-only --diff-filter=ACM); do
+  [ -f "$f" ] || continue
+  size=$(wc -c < "$f")
+  if [ "$size" -gt "$MAX" ]; then
+    echo "BLOCKED: $f is $((size/1048576)) MB (limit 5 MB)"
+    bad=1
+  fi
+done
+exit $bad
