@@ -15,7 +15,7 @@ class Site:
     build: Path = SCM / 'SAM_FWRCE_build'                          # holds the executable
     executable: str = 'SAM_ADV_MPDATA_SGS_TKE_RAD_CAM_MICRO_SAM1MOM'
     case: str = 'FWRCE'
-    rundata_source: Path = SCM / 'SAM_FWRCE_build'                 # RUNDATA/ + radiation *.nc live here
+    rundata_source: Path = SCM / 'SAM_Test'                        # RUNDATA/ + radiation *.nc (as the v3/wind launchers used)
     util_dir: Path = SCM / 'SAM6.11.8' / 'UTIL'                    # stat2nc, bin3D2nc, 2Dbin2nc
     # --- where new experiments go ---
     work_root: Path = SCM / 'SAM_HEAT_runs'
