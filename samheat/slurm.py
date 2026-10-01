@@ -64,8 +64,9 @@ echo "===== END: $(date) (mpirun exit $status) ====="
 
 def advance_command(exp_root, run_key):
     """The command a job runs for AUTO_ADVANCE: this same Python, this same code."""
-    return (f'{sys.executable} -m samheat.advance --exp {exp_root} --run {run_key} '
-            f'--from-job $SLURM_JOB_ID')
+    repo = Path(__file__).resolve().parents[1]      # works without `pip install`
+    return (f'PYTHONPATH={repo}:$PYTHONPATH {sys.executable} -m samheat.advance '
+            f'--exp {exp_root} --run {run_key} --from-job $SLURM_JOB_ID')
 
 
 class Slurm:

@@ -13,9 +13,10 @@ notebooks execute. Model output stays on Torch.
 ## Quickstart (on Torch)
 ```bash
 git clone <repo-url> SAM_HEAT && cd SAM_HEAT
-pip install -e .            # into the Python env you use for Jupyter
 git config core.hooksPath .githooks
 ```
+No install needed: the first cell of every notebook adds this repo to Python's path. (Optional
+alternative: `pip install -e .` into your Jupyter environment.) Updating is just `git pull`.
 1. `notebooks/00_Build_and_Smoke.ipynb`: checks the paths, prints the prm, runs 2 hours, and checks that the sun is perpetual.
 2. `notebooks/01_Launch_Control.ipynb`: edit the **LEVERS** cell, then run **Start** once and **Advance** whenever you want.
 3. `notebooks/02_Repro_vdD2025.ipynb`: Table 1 and Figs. 1–3 compared with the paper.
