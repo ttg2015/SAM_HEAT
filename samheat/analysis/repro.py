@@ -389,3 +389,124 @@ def load_summaries(experiment, rv_list, cache=True, **kw):
             f.write_bytes(pickle.dumps(s))
         out.append(s)
     return sorted(out, key=lambda s: s['rv'])
+
+
+# ---------------------------------------------------------------------------- sub-period robustness
+def subperiod_windows(t_end, last_days=30, n_sub=3):
+    """n_sub equal consecutive windows [(t0, t1), ...] [day] covering (t_end - last_days, t_end].
+    Each window is half-open (t0, t1] except the first, which includes t0 -- i.e. together
+    they hold exactly the snapshots analyze_run uses (t >= t_end - last_days), none twice."""
+    edges = t_end - last_days + last_days * np.arange(n_sub + 1) / n_sub
+    return [(float(a), float(b)) for a, b in zip(edges[:-1], edges[1:])]
+
+
+def _in_window(t, i, w, n_sub):
+    """Boolean mask of times belonging to window i = (t0, t1)."""
+    t = np.asarray(t, float)
+    lo = (t >= w[0] - 1e-6) if i == 0 else (t > w[0] + 1e-6)
+    return lo & (t <= w[1] + 1e-6)
+
+
+def _subperiod_run(rdir, rv, windows, q=99.9, zt=ZT, use_stat_rho=True):
+    """P_e, C_e, extreme profiles and mean RH of one run for each (t0, t1) window.
+    Returns a list of dicts (rv, RH, Pe, Ce, z, dy, th, n_snapshots), one per window."""
+    from ..io.sam2d import open_run_2d, prec_mm_hr
+    from ..io.sam3d import open_run_3d
+    from ..io.stat import open_stat
+
+    rdir = Path(rdir)
+    stat = open_stat(rdir)
+    if stat is None:
+        raise FileNotFoundError(f'no STAT .nc in {rdir / "OUT_STAT"}')
+    t_end = windows[-1][1]
+    d2 = open_run_2d(rdir, ['Prec'], tmin=windows[0][0] - 1e-6, tmax=t_end + 1e-6)
+    d3 = open_run_3d(rdir, ['TABS', 'QV', 'W'], tmin=windows[0][0] - 1e-6, tmax=t_end + 1e-6,
+                     zmax=zt + 2e3)
+    st = np.asarray(stat['time'].values, float)
+    out = []
+    n = len(windows)
+    for i, w in enumerate(windows):
+        m2 = _in_window(d2['time'].values, i, w, n)
+        m3 = _in_window(d3['time'].values, i, w, n)
+        ms = _in_window(st, i, w, n)
+        if not m2.any() or not m3.any() or not ms.any():
+            raise ValueError(f'{rdir}: no 2D/3D/STAT snapshots in window {w}')
+        P = prec_mm_hr(d2.isel(time=np.nonzero(m2)[0])).values
+        sub3 = d3.isel(time=np.nonzero(m3)[0])
+        ss = stat.isel(time=np.nonzero(ms)[0])
+        rho = ss['RHO'].mean('time') if (use_stat_rho and 'RHO' in stat) else None
+        cond = condensation_rate(sub3, zt, rho)
+        ex = extreme_profiles(sub3, cond, q, zt, rho)
+        out.append(dict(rv=float(rv), RH=float(ss['RELH'].isel(z=0).mean()),
+                        Pe=extreme_mean(P, q), Ce=ex['Ce'], z=ex['z'], dy=ex['dy'], th=ex['th'],
+                        n_snapshots=int(m3.sum()), t0=w[0], t1=w[1]))
+    return out
+
+
+def decomposition_table(per_window):
+    """Tidy DataFrame from {period_label: [run dicts]}: runs `decompose` per period.
+    Columns: period, scope ('total' or 'rv_a->rv_b'), quantity (P, eff, C, dynamic, thermo,
+    residual), value (scaling rate per unit fractional RH change)."""
+    import pandas as pd
+    rows = []
+    for label, runs in per_window.items():
+        r = decompose(runs)
+        for k, v in r['total'].items():
+            rows.append(dict(period=label, scope='total', quantity=k, value=float(v)))
+        for k, v in r['pairs'].items():
+            for j, val in enumerate(np.atleast_1d(v)):
+                rows.append(dict(period=label, scope=f'{r["rv"][j]:g}->{r["rv"][j + 1]:g}',
+                                 quantity=k, value=float(val)))
+    return pd.DataFrame(rows)
+
+
+def subperiod_summaries(experiment, rv_list, n_sub=3, last_days=30, q=99.9, zt=ZT,
+                        use_stat_rho=True, cache=True):
+    """CHECK A: is the dynamic term just sampling noise?
+
+    Splits the last `last_days` days of every run into n_sub equal consecutive sub-periods
+    (e.g. days 30-40, 40-50, 50-60), computes P_e, C_e and the extreme profiles in each, and
+    runs `decompose` on every sub-period (across the r_v series). Per-run results are cached
+    in <experiment>/analysis_cache/subperiods_rv*_n*_d*_q*.pkl (delete to recompute).
+
+    Returns (df, per_run): `df` is the tidy table from `decomposition_table`
+    (period 'sub1'.., scope, quantity, value); `per_run` has one row per (period, rv) with
+    t0, t1, RH, Pe, Ce, eff = Pe/Ce, n_snapshots. Runs whose ledger stage is not 'done' are skipped.
+    """
+    import pandas as pd
+    experiment = Path(experiment)
+    if not experiment.exists():
+        raise FileNotFoundError(f'{experiment} does not exist: check EXPERIMENT in the config cell')
+    ledger_file = experiment / 'ledger.json'
+    ledger = json.loads(ledger_file.read_text()) if ledger_file.exists() else {}
+    cdir = experiment / 'analysis_cache'
+    per_rv = {}
+    for rv in rv_list:
+        stage = ledger.get(f'rv{rv:g}', {}).get('stage')
+        if ledger and stage != 'done':
+            print(f'rv={rv:g}: not ready (stage {stage!r}); skipped')
+            continue
+        f = cdir / f'subperiods_rv{rv:g}_n{n_sub}_d{last_days:g}_q{q:g}.pkl'
+        if cache and f.exists():
+            per_rv[rv] = pickle.loads(f.read_bytes())
+            continue
+        rdir = run_dir(experiment, rv)
+        from ..io.stat import open_stat
+        stat = open_stat(rdir)
+        if stat is None:
+            raise FileNotFoundError(f'no STAT .nc in {rdir / "OUT_STAT"}')
+        windows = subperiod_windows(float(stat['time'][-1]), last_days, n_sub)
+        per_rv[rv] = _subperiod_run(rdir, rv, windows, q, zt, use_stat_rho)
+        if cache:
+            cdir.mkdir(exist_ok=True)
+            f.write_bytes(pickle.dumps(per_rv[rv]))
+    if len(per_rv) < 2:
+        raise ValueError('need at least two finished runs for a decomposition')
+    n = len(next(iter(per_rv.values())))
+    per_window = {f'sub{i + 1}': [per_rv[rv][i] for rv in per_rv] for i in range(n)}
+    df = decomposition_table(per_window)
+    runs = pd.DataFrame([dict(period=lab, rv=r['rv'], t0=r['t0'], t1=r['t1'], RH=r['RH'],
+                              Pe=r['Pe'], Ce=r['Ce'], eff=r['Pe'] / r['Ce'],
+                              n_snapshots=r['n_snapshots'])
+                         for lab, rs in per_window.items() for r in rs])
+    return df, runs

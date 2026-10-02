@@ -272,3 +272,111 @@ def test_table1_and_mean_profiles_fake_stat():
     pr = repro.mean_profiles(stat, 30)
     assert float(pr['zlcl']) == pytest.approx(25 + lcl(1e5, 297.0, rh=0.75))
     assert pr['RELH'].shape == (3,)
+
+
+# ------------------------------------------------------------------ sub-period check (A)
+def _synthetic_run(root, rv, seed, times, nz=5):
+    import xarray as xr
+    rng = np.random.default_rng(seed)
+    run = root / f'stage2_rv{rv:g}'
+    for sub in ('OUT_2D', 'OUT_3D', 'OUT_STAT'):
+        (run / sub).mkdir(parents=True)
+    z = np.array([25., 100., 250., 500., 900.])
+    p = np.array([1000., 990., 975., 950., 910.])
+    ny, nx = NYT * NSY, NXT * NSX
+    prec = {}
+    snaps = []
+    for i, t in enumerate(times):
+        a = (rng.exponential(1.0, (ny, nx)) * 10).astype('f4')
+        prec[t] = a
+        snaps.append((i, t, dict(Prec=a)))
+        T = (np.linspace(300, 285, nz)[:, None, None] + rng.random((nz, ny, nx))).astype('f4')
+        QV = np.full((nz, ny, nx), 12., 'f4')
+        QV[0] = 0.99 * repro.qsat(T[0], p[0])        # near-saturated: LCL below the top level
+        W = (rng.standard_normal((nz, ny, nx)) + 1).astype('f4')
+        write_bin3d(run / 'OUT_3D' / f'x_{i:010d}.bin3D', t, z, p, dict(TABS=T, QV=QV, W=W))
+    write_2dbin(run / 'OUT_2D' / 'x.2Dbin', snaps)
+    st = xr.Dataset(dict(RELH=(('time', 'z'), np.full((len(times), nz), 70. - rv / 100.))),
+                    coords=dict(time=np.array(times), z=z))
+    st.to_netcdf(run / 'OUT_STAT' / 'x.nc')
+    return prec
+
+
+def test_subperiod_windows_partition_snapshots():
+    w = repro.subperiod_windows(60.0, 30, 3)
+    assert w == [(30.0, 40.0), (40.0, 50.0), (50.0, 60.0)]
+    t = np.arange(30.0, 60.0001, 0.125)                    # 3-hourly, includes both ends
+    masks = [repro._in_window(t, i, x, 3) for i, x in enumerate(w)]
+    assert np.sum(masks, axis=0).tolist() == [1] * len(t)  # every snapshot exactly once
+    assert [int(m.sum()) for m in masks] == [81, 80, 80]
+
+
+def test_subperiod_summaries_synthetic(tmp_path):
+    times = [30.0 + 0.5 * i for i in range(13)]            # 30.0 .. 36.0
+    precs = {rv: _synthetic_run(tmp_path, rv, 10 + int(rv), times) for rv in (0, 500)}
+    df, runs = repro.subperiod_summaries(tmp_path, [0, 500], n_sub=3, last_days=6, q=90.0)
+    assert sorted(runs.period.unique()) == ['sub1', 'sub2', 'sub3']
+    assert runs[runs.rv == 0].n_snapshots.tolist() == [5, 4, 4]
+    assert runs[runs.rv == 0].t0.tolist() == [30.0, 32.0, 34.0]
+    # P_e of sub-period 2 = extreme mean of exactly the snapshots in (32, 34]
+    sel = [t for t in times if 32.0 < t <= 34.0]
+    expect = repro.extreme_mean(np.stack([precs[0][t] for t in sel]) / 24.0, 90.0)
+    got = runs[(runs.rv == 0) & (runs.period == 'sub2')].Pe.iloc[0]
+    assert got == pytest.approx(expect, rel=1e-5)
+    tot = df[(df.scope == 'total') & (df.quantity == 'dynamic')]
+    assert len(tot) == 3 and np.isfinite(tot.value).all()
+    assert set(df.quantity) == {'P', 'eff', 'C', 'dynamic', 'thermo', 'residual'}
+    assert set(df.scope) == {'total', '0->500'}
+    # cached: second call must not touch the data
+    assert len(list((tmp_path / 'analysis_cache').glob('subperiods_*.pkl'))) == 2
+    for sub in ('OUT_2D', 'OUT_3D'):
+        for f in (tmp_path / 'stage2_rv0' / sub).glob('*'):
+            f.unlink()
+    df2, _ = repro.subperiod_summaries(tmp_path, [0, 500], n_sub=3, last_days=6, q=90.0)
+    np.testing.assert_allclose(df2.value, df.value)
+
+
+# ------------------------------------------------------------------ bin3D vs converter (B)
+def _mock_converter(perturb=0.0, shift_w=False):
+    import xarray as xr
+
+    def fake_sh(cmd, cwd=None, check=True, modules=(), quiet=True):
+        assert 'bin3D2nc' in cmd
+        f = next(__import__('pathlib').Path(cwd).glob('*.bin3D'))
+        ds = sam3d.read_bin3D(f)
+        if perturb:
+            ds['TABS'] = ds['TABS'] * (1 + perturb)
+        if shift_w:
+            ds['W'] = ds['W'].isel(z=slice(1, None)).reindex(z=ds['z'])
+        ds.to_netcdf(f.with_suffix('.nc'))
+        return ''
+    return fake_sh
+
+
+def _one_bin3d(tmp_path):
+    rng = np.random.default_rng(4)
+    z = np.array([25., 100., 250.])
+    p = np.array([1000., 990., 975.])
+    f = tmp_path / 'a' / 'x.bin3D'
+    f.parent.mkdir()
+    shp = (3, NYT * NSY, NXT * NSX)
+    write_bin3d(f, 30.5, z, p, dict(TABS=rng.random(shp).astype('f4') + 280,
+                                    W=rng.standard_normal(shp).astype('f4')))
+    return f
+
+
+def test_compare_bin3d_with_converter_mocked(tmp_path, monkeypatch, capsys):
+    from samheat.io import check3d
+    f = _one_bin3d(tmp_path)
+    monkeypatch.setattr('samheat.slurm.sh', _mock_converter())
+    df = check3d.compare_bin3d_with_converter(f)
+    assert df.attrs['passed'] and 'PASS' in capsys.readouterr().out
+    assert set(df[df.kind == 'field'].variable) == {'TABS', 'W'}
+    assert set(df[df.kind == 'coord'].variable) == {'x', 'y', 'z', 'p', 'time'}
+    assert df.max_abs.dropna().max() == 0
+    monkeypatch.setattr('samheat.slurm.sh', _mock_converter(perturb=1e-3))
+    df = check3d.compare_bin3d_with_converter(f, verbose=False)
+    assert not df.attrs['passed']
+    assert not df.set_index('variable').loc['TABS', 'ok'] and df.set_index('variable').loc['W', 'ok']
+    monkeypatch.setattr('samheat.slurm.sh', _mock_converter(shift_w=True))
+    assert not check3d.compare_bin3d_with_converter(f, verbose=False).attrs['passed']
