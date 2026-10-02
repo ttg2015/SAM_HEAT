@@ -27,6 +27,7 @@ CONVENTIONS AND UNITS (read before comparing with the paper).
     sample in ~4e6.
 """
 import math
+import json
 import pickle
 from pathlib import Path
 
@@ -367,8 +368,17 @@ def load_summaries(experiment, rv_list, cache=True, **kw):
     (delete the pickle to recompute). Returns a list of dicts sorted by rv."""
     experiment = Path(experiment)
     cdir = experiment / 'analysis_cache'
+    ledger_file = experiment / 'ledger.json'
+    if not experiment.exists():
+        raise FileNotFoundError(f'{experiment} does not exist: check EXPERIMENT in the config cell')
+    ledger = json.loads(ledger_file.read_text()) if ledger_file.exists() else {}
     out = []
     for rv in rv_list:
+        stage = ledger.get(f'rv{rv:g}', {}).get('stage')
+        if ledger and stage != 'done':
+            # never analyse (or cache) a run whose Stage 2 has not finished
+            print(f'rv={rv:g}: not ready (stage {stage!r}); skipped')
+            continue
         f = cdir / f'vdD_rv{rv:g}.pkl'
         if cache and f.exists():
             out.append(pickle.loads(f.read_bytes()))
