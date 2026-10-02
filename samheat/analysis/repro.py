@@ -338,7 +338,7 @@ def analyze_run(rdir, rv, last_days=30, q=99.9, block=8, n_boot=100, seed=0, zt=
     from ..io.stat import open_stat
 
     rdir = Path(rdir)
-    stat = open_stat(rdir, convert=False)
+    stat = open_stat(rdir)          # converts .stat -> .nc with stat2nc if needed
     if stat is None:
         raise FileNotFoundError(f'no STAT .nc in {rdir / "OUT_STAT"}')
     t1 = float(stat['time'][-1])
