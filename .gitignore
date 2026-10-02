@@ -69,3 +69,7 @@ id_*
 
 # Local read-only copy of the SAM/FWRCE source pulled from Torch (not ours; keep off GitHub)
 model_source/
+
+# Small result files copied back from Torch for local analysis
+exports/
+*_export.json
