@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 R_SND, CP_SND = 287.05, 1004.0      # constants used by snd_from_sam.py
-PLAUSIBLE_T = (200.0, 320.0)
+PLAUSIBLE_T = (150.0, 330.0)        # tropical cold point can be < 195 K
 
 
 def read_snd(path):

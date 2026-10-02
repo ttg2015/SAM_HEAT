@@ -139,3 +139,13 @@ def test_auto_advance_script(tmp_path):
     exp.start()
     script = (exp.root / 'ocean' / 'run.slurm').read_text()
     assert 'samheat.advance' in script and 'STOP' in script and '--from-job $SLURM_JOB_ID' in script
+
+
+def test_cold_tropopause_is_accepted():
+    """A ~194 K cold point (seen in the first perpetual-sun ocean run) is physical."""
+    import xarray as xr
+    from samheat.sounding import snd_from_stat
+    T = T_PROFILE.copy(); T[40] = 193.9
+    st = xr.Dataset(dict(TABS=(('time', 'z'), np.tile(T, (24, 1))), QV=(('time', 'z'), np.ones((24, 64))),
+                         p=('z', P)), coords=dict(time=np.arange(24) / 2.4, z=np.arange(64.)))
+    assert snd_from_stat(st, 5, 1006.91)['tp'].shape == (64,)
