@@ -38,6 +38,7 @@ DEFAULTS = dict(
     name='vdd2025_repro',
     rv_list=[0, 200, 500, 1000, 2000],
     ts_ocean=300.0,
+    grid='grd',           # file in case/FWRCE: 'grd' = stock RCE grid (25 m), 'grd_vdd2025' = van der Drift's (37.5 m)
     ocean=dict(days=50, avg_days=10, snd='snd_vdd300K'),
     stage1=dict(days=40, extend_days=10, window_days=10, tol_K=0.1, max_days=100,
                 tau_sst=311040.0, p_low=400.0, p_upp=600.0,
@@ -82,6 +83,8 @@ class Experiment:
         self.ledger = Ledger(self.root / 'ledger.json')
         self.snd_ref = self.root / 'reference' / 'snd_ref'
         namelist.merge({}, c['overrides'])            # fail early on a typo in OVERRIDES
+        if not (CASE_FILES / site.case / c['grid']).exists():
+            raise FileNotFoundError(f"GRID '{c['grid']}' not found in {CASE_FILES / site.case}")
 
     # ------------------------------------------------------------------ configuration --
     @classmethod
@@ -98,7 +101,8 @@ class Experiment:
         if f.exists():
             old = json.loads(f.read_text())
             diff = sorted(k for k in set(old) | set(cur)
-                          if k not in MUTABLE and k != 'name' and old.get(k) != cur.get(k))
+                          if k not in MUTABLE and k != 'name'
+                          and old.get(k, DEFAULTS.get(k)) != cur.get(k, DEFAULTS.get(k)))
             if diff:
                 raise RuntimeError(
                     f'{self.root.name} already exists with different settings for {diff}.\n'
@@ -159,7 +163,7 @@ class Experiment:
         run_dir = self.root / name
         p = self.params(stage, rv, ts, name)
         stage_run(run_dir, p, snd, allow_diurnal=self.cfg['allow_diurnal'], site=self.site,
-                  link_exe=self.link_exe, meta=dict(experiment=self.cfg['name'], stage=stage, rv=rv))
+                  link_exe=self.link_exe, grid=self.cfg['grid'], meta=dict(experiment=self.cfg['name'], stage=stage, rv=rv))
         e = state.setdefault(key, dict(key=key, rv=rv))
         e.update(stage=stage, dir=str(run_dir), nstop=p['nstop'], ts=ts, n_submits=0, no_progress=0)
         self._write_and_submit(e, key, walltime)
@@ -211,7 +215,7 @@ class Experiment:
         run_dir = self.root.parent / f'{self.cfg["name"]}_smoke'
         p = self.params('smoke', ts=int(hours * 360), name=run_dir.name)
         stage_run(run_dir, p, CASE_FILES / self.site.case / self.cfg['ocean']['snd'],
-                  allow_diurnal=self.cfg['allow_diurnal'], site=self.site, link_exe=self.link_exe)
+                  allow_diurnal=self.cfg['allow_diurnal'], site=self.site, link_exe=self.link_exe, grid=self.cfg['grid'])
         (run_dir / 'run.slurm').write_text(batch_script(run_dir, run_dir.name,
                                                         self.site.walltime['smoke'], site=self.site))
         job = self.sched.submit(run_dir)

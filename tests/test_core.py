@@ -149,3 +149,19 @@ def test_cold_tropopause_is_accepted():
     st = xr.Dataset(dict(TABS=(('time', 'z'), np.tile(T, (24, 1))), QV=(('time', 'z'), np.ones((24, 64))),
                          p=('z', P)), coords=dict(time=np.arange(24) / 2.4, z=np.arange(64.)))
     assert snd_from_stat(st, 5, 1006.91)['tp'].shape == (64,)
+
+
+def test_grid_lever_and_old_experiments(tmp_path):
+    exp, _ = make(tmp_path, grid='grd_vdd2025', name='vddgrid')
+    exp.start()
+    grd = (exp.root / 'ocean' / 'FWRCE' / 'grd').read_text().split()
+    assert float(grd[0]) == 37.5
+    # an experiment created before the GRID lever existed (no 'grid' in experiment.json) still opens
+    import json
+    old, _ = make(tmp_path, name='oldexp')
+    old.start()
+    cfg = json.loads((old.root / 'experiment.json').read_text()); cfg.pop('grid')
+    (old.root / 'experiment.json').write_text(json.dumps(cfg))
+    old.advance()
+    with pytest.raises(FileNotFoundError):
+        make(tmp_path, grid='no_such_grid')
