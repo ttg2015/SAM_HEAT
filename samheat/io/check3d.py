@@ -111,12 +111,12 @@ def compare_bin3d_with_converter(bin3d_path, site=SITE, rtol=RTOL, keep=None, ve
         rows.append(_coord_row(name, np.asarray(ours[name].values, float).ravel(),
                                _coord(nc, alts), rtol, offset_ok=name in ('x', 'y')))
     df = pd.DataFrame(rows)
-    need = df[(df.kind == 'field') & df.ok.notna() | df.variable.isin(['z', 'p', 'time', 'x', 'y'])]
+    need = df[((df.kind == 'field') & df.ok.notna()) | ((df.kind == 'coord') & df.variable.isin(['z', 'p', 'time', 'x', 'y']))]
     passed = bool(len(common)) and bool(need.ok.astype(bool).all())
     if verbose:
         print(f'{"PASS" if passed else "FAIL"}: {src.name}: {len(common)} common fields, '
               f'tolerance {rtol:g} relative (max |a-b| / max |converter|)')
         if not passed:
-            print(df[~df.ok.fillna(True).astype(bool)].to_string())
+            print(df[df.ok.eq(False)].to_string())
     df.attrs['passed'] = passed
     return df
