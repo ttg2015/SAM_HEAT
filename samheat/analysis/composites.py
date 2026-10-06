@@ -127,19 +127,49 @@ def composite(data, classify, params=None, include_all=True, progress=50):
     return out
 
 
-def open_3d(run_dir, source='bin', tmin=None, tmax=None):
-    """3D output of one run: 'bin' reads OUT_3D/*.bin3D directly; 'nc' opens converted .nc files."""
+def _step_of(path):
+    """Model step from SAM's output name <case>_<caseid>_<nsub>_<step>.<ext> (None if not parseable)."""
+    try:
+        return int(Path(path).name.split('.')[0].rsplit('_', 1)[-1])
+    except ValueError:
+        return None
+
+
+def resolve_source(run_dir, source='auto'):
+    """'auto' -> 'nc' if every OUT_3D/*.bin3D has its converted .nc (or there are only .nc files),
+    else 'bin'. 'bin' and 'nc' are returned unchanged. The two give bit-identical data."""
+    if source != 'auto':
+        return source
+    out = Path(run_dir) / 'OUT_3D'
+    bins = sorted(out.glob('*.bin3D'))
+    if bins:
+        return 'nc' if all(b.with_suffix('.nc').exists() for b in bins) else 'bin'
+    return 'nc' if any(out.glob('*.nc')) else 'bin'
+
+
+def open_3d(run_dir, source='auto', tmin=None, tmax=None, steps_per_day=8640):
+    """3D output of one run as Dataset (time, z, y, x) with p.
+
+    source: 'bin' reads OUT_3D/*.bin3D directly; 'nc' opens the converted .nc files (one per
+    snapshot, from bin3D2nc); 'auto' picks 'nc' when every snapshot is converted. For 'nc', files
+    outside [tmin, tmax] are skipped by their step number (steps_per_day = 86400/dt) and the rest
+    are opened as plain consecutive snapshots, without cross-checking coordinates (much faster)."""
     run_dir = Path(run_dir)
+    source = resolve_source(run_dir, source)
     if source == 'bin':
         from ..io.sam3d import open_run_3d
         return open_run_3d(run_dir, tmin=tmin, tmax=tmax)
-    if source == 'nc':
-        files = sorted((run_dir / 'OUT_3D').glob('*.nc'))
-        if not files:
-            raise FileNotFoundError(f'no .nc in {run_dir / "OUT_3D"}: convert first or use source="bin"')
-        ds = xr.open_mfdataset(files)
-        return ds.sel(time=slice(tmin, tmax))
-    raise ValueError(f"source must be 'bin' or 'nc', not {source!r}")
+    if source != 'nc':
+        raise ValueError(f"source must be 'auto', 'bin' or 'nc', not {source!r}")
+    files = sorted((run_dir / 'OUT_3D').glob('*.nc'), key=lambda f: (_step_of(f) is None, _step_of(f) or 0, f.name))
+    if not files:
+        raise FileNotFoundError(f'no .nc in {run_dir / "OUT_3D"}: convert first or use source="bin"')
+    if all(_step_of(f) is not None for f in files):
+        day = lambda f: _step_of(f) / steps_per_day
+        files = [f for f in files if (tmin is None or day(f) >= tmin - 1e-6) and (tmax is None or day(f) <= tmax + 1e-6)]
+    ds = xr.open_mfdataset(files, combine='nested', concat_dim='time', data_vars='minimal',
+                           coords='minimal', compat='override', join='override')
+    return ds.sel(time=slice(tmin, tmax))
 
 
 def mask_key(classify, params=None, **extra):
@@ -163,15 +193,16 @@ def near_surface_rh(run_dir, tmin=None, tmax=None):
 
 
 def composite_experiment(experiment, rv_list, classify, mask_name='mask', mask_params=None,
-                         source='bin', tmin=None, tmax=None, include_all=True, cache=True,
+                         source='auto', tmin=None, tmax=None, include_all=True, cache=True,
                          force=False, run_name='stage2_rv{rv:g}'):
     """composite() for every r_v of an experiment -> Dataset (rv, group, z) with coords
     fraction(rv, group), count(rv, group) and RH(rv). Each run is cached in
     <experiment>/analysis_cache/composite_<mask_name>_<key>_rv<rv>.nc; the key changes when the
-    mask's code or parameters, the time window, the source or include_all change."""
+    mask's code or parameters, the time window or include_all change (not with the source:
+    .bin3D and converted .nc give identical results)."""
     experiment = Path(experiment)
-    key = mask_key(classify, mask_params, source=source, tmin=tmin, tmax=tmax, include_all=include_all,
-                   derived=DERIVED_VERSION)
+    key = mask_key(classify, mask_params, tmin=tmin, tmax=tmax, include_all=include_all,
+                   derived=DERIVED_VERSION)          # not the source: bin and nc are bit-identical
     cdir = experiment / 'analysis_cache'
     runs = []
     for rv in rv_list:
@@ -181,13 +212,14 @@ def composite_experiment(experiment, rv_list, classify, mask_name='mask', mask_p
             print(f'rv={rv:g}: from cache ({f.name})')
             c = xr.load_dataset(f)
         else:
-            print(f'rv={rv:g}: computing from {rdir}')
-            c = composite(open_3d(rdir, source, tmin, tmax), classify, mask_params, include_all)
+            src = resolve_source(rdir, source)
+            print(f'rv={rv:g}: computing from {rdir} ({src} files)')
+            c = composite(open_3d(rdir, src, tmin, tmax), classify, mask_params, include_all)
             c = c.assign_coords(RH=near_surface_rh(rdir, c.attrs['t_start'], c.attrs['t_end']))
             if cache:
                 cdir.mkdir(exist_ok=True)
                 c.attrs.update(mask_name=mask_name, mask_key=key, mask_params=repr(mask_params or {}),
-                               source=source)
+                               source=src)
                 c.to_netcdf(f)
         runs.append(c.expand_dims(rv=[float(rv)]))
     out = xr.concat(runs, dim='rv', coords=['count', 'fraction', 'RH'], combine_attrs='drop_conflicts')

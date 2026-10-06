@@ -106,3 +106,32 @@ def test_saturated_fields_and_fit_xlim():
     lo, hi = ax.get_xlim()
     assert 318 < lo < 320 and 340 < hi < 342
     plt.close(fig)
+
+
+def test_nc_source_matches_bin_and_auto(tmp_path):
+    """Converted files as bin3D2nc writes them (one per snapshot, p(z) a variable) give the same
+    composites as the binaries; 'auto' picks nc only when every snapshot is converted."""
+    rng = np.random.default_rng(5)
+    out = tmp_path / 'stage2_rv0' / 'OUT_3D'
+    out.mkdir(parents=True)
+    steps = [259200, 260280, 261360, 270000]            # days 30, 30.125, 30.25, 31.25 at dt = 10 s
+    for s in steps:
+        f = _fields(rng)
+        name = f'FWRCE_stage2_rv0_32_{s:010d}'
+        write_bin3d(out / f'{name}.bin3D', s / 8640, Z, P, f)
+        ny, nx = f['W'].shape[1:]
+        xr.Dataset({k: (('time', 'z', 'y', 'x'), v[None]) for k, v in f.items()} | {'p': ('z', P)},
+                   coords=dict(time=[s / 8640], z=Z, y=np.arange(ny) * 1e3, x=np.arange(nx) * 1e3)
+                   ).to_netcdf(out / f'{name}.nc')
+    run = tmp_path / 'stage2_rv0'
+    assert C.resolve_source(run, 'auto') == 'nc'
+    b = C.open_3d(run, 'bin', 30, 30.3)
+    n = C.open_3d(run, 'nc', 30, 30.3)
+    assert n.sizes['time'] == b.sizes['time'] == 3                   # day 31.25 skipped by name
+    np.testing.assert_allclose(n.W.values, b.W.values)
+    cb = C.composite(b, symmetric, progress=0)
+    cn = C.composite(n, symmetric, progress=0)
+    xr.testing.assert_allclose(cb.TABS, cn.TABS)
+    xr.testing.assert_allclose(cb.THETA_E, cn.THETA_E)
+    (out / f'FWRCE_stage2_rv0_32_{steps[-1]:010d}.nc').unlink()      # one snapshot not converted
+    assert C.resolve_source(run, 'auto') == 'bin'
