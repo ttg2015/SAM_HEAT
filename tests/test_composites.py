@@ -82,3 +82,27 @@ def test_experiment_cache_and_key(tmp_path):
     # a different threshold is a different cache entry
     C.composite_experiment(tmp_path, [0], symmetric, 'sym', dict(k=1, X=0.8))
     assert len(list((tmp_path / 'analysis_cache').glob('composite_sym_*'))) == 3
+
+
+def test_saturated_fields_and_fit_xlim():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    T = np.full((1, 1, 1), 300.)
+    f = dict(TABS=T, QV=np.full((1, 1, 1), 15.), PP=np.zeros((1, 1, 1)))
+    d = C.derived_fields(f, np.array([1000.]), np.array([0.]))
+    from samheat.analysis.thermo_SAM import qsat
+    qs = qsat(300., 1000.)
+    assert 22 < qs < 23                                                  # ~22.4 g/kg at 300 K, 1000 hPa
+    assert d['MSE_SAT'].item() == pytest.approx(1.005 * 300 + 2.5 * qs)
+    assert d['THETA_ES'].item() > d['THETA_E'].item()                    # subsaturated air: theta_e < theta_e*
+    # saturated air: theta_e == theta_es
+    f['QV'] = np.full((1, 1, 1), qs)
+    d = C.derived_fields(f, np.array([1000.]), np.array([0.]))
+    assert d['THETA_E'].item() == pytest.approx(d['THETA_ES'].item(), abs=0.3)
+    fig, ax = plt.subplots()
+    z = np.array([0., 1000., 20000.])
+    C.fit_xlim(ax, [np.array([330., 320., 480.]), np.array([340., 325., 490.])], z, zmax=16000)
+    lo, hi = ax.get_xlim()
+    assert 318 < lo < 320 and 340 < hi < 342
+    plt.close(fig)

@@ -20,6 +20,10 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+DERIVED_VERSION = 2      # bump when derived_fields changes, so cached composites are recomputed
+# saturated counterparts drawn as dashed lines next to their parent quantity
+SAT_PAIRS = {'MSE': 'MSE_SAT', 'MSE_frozen': 'MSE_frozen_SAT', 'THETA_E': 'THETA_ES'}
+
 # SAM constants (SAM_SRC/params.f90) and the liquid/ice partition of MICRO_SAM1MOM/micro_params.f90
 CP, G, LC, LF = 1004., 9.81, 2.5104e6, 0.3336e6
 TBGMIN, TBGMAX, TPRMIN, TPRMAX = 253.16, 273.16, 268.16, 283.16
@@ -48,9 +52,33 @@ def derived_fields(f, p, z):
     ptot = np.asarray(p, float)[:, None, None] + f.get('PP', 0.) / 100.
     e = ptot * (qv / 1000.) / (0.622 + qv / 1000.)
     TL = 2840. / (3.5 * np.log(T) - np.log(np.maximum(e, 1e-6)) - 4.805) + 55.
-    out['THETA_E'] = (T * (1000. / ptot) ** (0.2854 * (1 - 0.28e-3 * qv))
-                      * np.exp((3.376 / TL - 0.00254) * qv * (1 + 0.81e-3 * qv)))
+    out['THETA_E'] = _bolton_theta_e(T, ptot, qv, TL)
+    # saturated counterparts: the same air if it were saturated (q_v -> q*, no condensate).
+    # q* is SAM's saturation mixing ratio, liquid/ice mixed with the cloud partition (thermo_SAM.qsat).
+    from .thermo_SAM import qsat
+    qs = qsat(T, ptot)                                                  # g/kg
+    out['MSE_SAT'] = 1.005 * T + 2.5 * qs + (9.8 / 1000) * zz
+    out['MSE_frozen_SAT'] = (CP * T + G * zz + LC * qs / 1000.) / 1000.
+    out['THETA_ES'] = _bolton_theta_e(T, ptot, qs, T)                   # saturated: T_L = T
     return out
+
+
+def _bolton_theta_e(T, p, r, TL):
+    """Bolton (1980) eq. 39; T, TL in K, p in hPa, r in g/kg."""
+    return (T * (1000. / p) ** (0.2854 * (1 - 0.28e-3 * r))
+            * np.exp((3.376 / TL - 0.00254) * r * (1 + 0.81e-3 * r)))
+
+
+def fit_xlim(ax, profiles, z, zmax=None, pad=0.05):
+    """Set ax's x-limits to the range of `profiles` (list of 1D arrays on z) below zmax."""
+    z = np.asarray(z, float)
+    sel = np.ones(z.size, bool) if zmax is None else z <= zmax
+    vals = np.concatenate([np.asarray(v, float)[sel] for v in profiles])
+    vals = vals[np.isfinite(vals)]
+    if vals.size:
+        lo, hi = vals.min(), vals.max()
+        d = (hi - lo) * pad or abs(hi) * 1e-3 or 1e-3
+        ax.set_xlim(lo - d, hi + d)
 
 
 def _snapshot_p(s, nz):
@@ -142,7 +170,8 @@ def composite_experiment(experiment, rv_list, classify, mask_name='mask', mask_p
     <experiment>/analysis_cache/composite_<mask_name>_<key>_rv<rv>.nc; the key changes when the
     mask's code or parameters, the time window, the source or include_all change."""
     experiment = Path(experiment)
-    key = mask_key(classify, mask_params, source=source, tmin=tmin, tmax=tmax, include_all=include_all)
+    key = mask_key(classify, mask_params, source=source, tmin=tmin, tmax=tmax, include_all=include_all,
+                   derived=DERIVED_VERSION)
     cdir = experiment / 'analysis_cache'
     runs = []
     for rv in rv_list:
