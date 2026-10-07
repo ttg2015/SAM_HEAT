@@ -18,6 +18,7 @@ or (AUTO_ADVANCE) by a job when it ends. Guards against runaway loops, all in th
     * a STOP file in the experiment directory -> advance() does nothing
 """
 import json
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from .logs import finished_cleanly, health, last_nstep
 from .paths import SITE
 from .presets import DAY, NEVER
 from .slurm import Slurm, advance_command, batch_script
-from .sounding import read_snd, snd_from_stat, write_snd
+from .sounding import read_snd, snd_from_stat, with_wind, write_snd
 from .staging import CASE_FILES, stage_run, update_prm
 
 DEFAULTS = dict(
@@ -50,6 +51,13 @@ DEFAULTS = dict(
     auto_advance=False,
     dry_run=False,
     max_submits=8,
+    # mean wind: None = calm (no nudging). dict(profile='uniform', U=5., V=0., tauls=7200.) nudges the
+    # domain-mean wind toward the target with time scale tauls [s] (Muller 2013: 2 h), whole column
+    # unless z1/z2 [m] are given; 'linear' adds z_top/u_bottom (see sounding.wind_profile).
+    wind=None,
+    # name (or path) of a finished experiment whose ocean reference (T_ref, snd_ref) is reused
+    # instead of running a new ocean run: the free troposphere is held at THAT reference.
+    reference_from=None,
 )
 # Settings that may change after the experiment has started (they affect no physics).
 MUTABLE = {'auto_advance', 'dry_run', 'max_submits', 'rv_list'}
@@ -150,6 +158,10 @@ class Experiment:
                      nsave2D=360, nsave2Dstart=360, nsave2Dend=NEVER)
         else:
             raise ValueError(stage)
+        w = c.get('wind')
+        if w:
+            p.update(donudging_uv=True, tauls=float(w.get('tauls', 7200.)),
+                     nudging_uv_z1=float(w.get('z1', -1.)), nudging_uv_z2=float(w.get('z2', 1e6)))
         return p
 
     def ts_guess(self, rv):
@@ -166,9 +178,21 @@ class Experiment:
         e['job_id'] = 'DRYRUN' if self.cfg['dry_run'] else self.sched.submit(run_dir)
         e['n_submits'] = e.get('n_submits', 0) + 1
 
+    def _windy(self, snd):
+        """The sounding a run starts from: with WIND, a copy whose u, v columns are the target
+        wind (SAM's nudging target and initial wind), written once next to snd_ref."""
+        w = self.cfg.get('wind')
+        if not w:
+            return snd
+        out = self.root / 'reference' / f'{Path(snd).name}_wind'
+        if not out.exists():
+            write_snd(out, with_wind(read_snd(snd), w))
+        return out
+
     def _new_run(self, state, key, stage, rv, ts, snd, walltime):
         name = 'ocean' if stage == 'ocean' else f'stage{stage}_{key}'
         run_dir = self.root / name
+        snd = self._windy(snd)
         p = self.params(stage, rv, ts, name)
         stage_run(run_dir, p, snd, allow_diurnal=self.cfg['allow_diurnal'], site=self.site,
                   link_exe=self.link_exe, grid=self.cfg['grid'], meta=dict(experiment=self.cfg['name'], stage=stage, rv=rv))
@@ -214,9 +238,38 @@ class Experiment:
             if 'ocean' in state:
                 print(f'ocean: already tracked (stage {state["ocean"]["stage"]})')
                 return
+            if self.cfg.get('reference_from'):
+                self._borrow_reference(state)
+                self._launch_waiting(state)
+                return
             snd = CASE_FILES / self.site.case / self.cfg['ocean']['snd']
             self._new_run(state, 'ocean', 'ocean', 0.0, float(self.cfg['ts_ocean']), snd,
                           self.site.walltime['ocean'])
+
+    def _borrow_reference(self, state):
+        """Reuse a finished experiment's ocean reference (T_ref and snd_ref). Refuses if anything
+        that defines the reference differs: grid, ocean SST and settings, layer, OVERRIDES, sun."""
+        base = Path(self.cfg['reference_from'])
+        base = base if base.is_absolute() else Path(self.site.work_root) / base
+        meta = Ledger(base / 'ledger.json').load()
+        if meta.get('ocean', {}).get('stage') != 'done' or 'T_ref' not in meta.get('_meta', {}) \
+                or not (base / 'reference' / 'snd_ref').exists():
+            raise RuntimeError(f'{base} has no finished ocean reference (run its ocean stage first)')
+        bcfg = json.loads((base / 'experiment.json').read_text())
+        get = lambda d, k: d.get(k, json.loads(json.dumps(DEFAULTS.get(k), default=str)))
+        mine = json.loads(json.dumps(self.cfg, default=str))
+        bad = [k for k in ('grid', 'ts_ocean', 'ocean', 'overrides', 'allow_diurnal') if get(bcfg, k) != get(mine, k)]
+        bad += [f'stage1.{k}' for k in ('p_low', 'p_upp') if get(bcfg, 'stage1').get(k) != mine['stage1'].get(k)]
+        if bad:
+            raise RuntimeError(f'cannot borrow the reference of {base.name}: different {bad}')
+        self.snd_ref.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(base / 'reference' / 'snd_ref', self.snd_ref)
+        T_ref = meta['_meta']['T_ref']
+        state['_meta'].update(T_ref=T_ref, reference_from=str(base),
+                              ocean_drift_K=meta['_meta'].get('ocean_drift_K'))
+        state['ocean'] = dict(key='ocean', rv=0.0, stage='done', borrowed_from=str(base), history=[])
+        note(state['ocean'], f'reference borrowed from {base} (T_ref={T_ref:.3f} K); no ocean run')
+        print(f'ocean: reference borrowed from {base.name} (T_ref = {T_ref:.3f} K)')
 
     def smoke_test(self, hours=2):
         """A short perpetual-sun run (own directory) to check the build, the prm and SOLIN."""

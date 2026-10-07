@@ -179,3 +179,47 @@ def test_ts_guesses_and_rv_list_may_change_mid_experiment(tmp_path):
     with pytest.raises(RuntimeError, match='new EXPERIMENT name'):   # real physics still locked
         Experiment(dict(more, stage1=dict(tau_sst=1e5)), site=exp.site, scheduler=sched,
                    stat_loader=FakeStat(), link_exe=False).advance()
+
+
+def test_wind_experiment_borrows_calm_reference(tmp_path):
+    from samheat.sounding import read_snd
+    base, sched = make(tmp_path, name='calm', grid='grd_vdd2025')
+    base.start(); base.advance()                                      # calm ocean done -> T_ref
+    T_ref = base.ledger.load()['_meta']['T_ref']
+    n_before = len(sched.submissions)
+    windy = Experiment(dict(name='calm_U5', rv_list=[0, 500], grid='grd_vdd2025', reference_from='calm',
+                            wind=dict(profile='uniform', U=5.0, tauls=7200.)),
+                       site=base.site, scheduler=sched, stat_loader=FakeStat(), link_exe=False)
+    windy.start()
+    st = windy.ledger.load()
+    assert st['_meta']['T_ref'] == T_ref and st['ocean']['stage'] == 'done'
+    assert 'ocean' not in sched.submissions[n_before:]                # no new ocean run
+    assert sorted(sched.submissions[n_before:]) == ['stage1_rv0', 'stage1_rv500']
+    prm = namelist.read_prm(windy.root / 'stage1_rv500' / 'FWRCE' / 'prm')
+    assert prm['donudging_uv'] is True and prm['tauls'] == 7200.0
+    assert prm['nudging_uv_z1'] == -1.0 and prm['doperpetual'] is True
+    snd = read_snd(windy.root / 'stage1_rv500' / 'FWRCE' / 'snd')
+    assert np.allclose(snd['u'], 5.0) and np.allclose(snd['v'], 0.0)
+    # the same thermodynamic profile as the calm reference
+    calm = read_snd(base.snd_ref)
+    assert np.allclose(snd['tp'], calm['tp']) and np.allclose(snd['q'], calm['q'])
+    assert float((windy.root / 'stage1_rv500' / 'FWRCE' / 'grd').read_text().split()[0]) == 37.5
+    windy.advance(); windy.advance()                                  # Stage 1 -> 2 -> done
+    assert {k: e['stage'] for k, e in windy.ledger.load().items() if k != '_meta'} == \
+        {'ocean': 'done', 'rv0': 'done', 'rv500': 'done'}
+
+
+def test_borrow_refuses_mismatched_reference(tmp_path):
+    base, sched = make(tmp_path, name='calm2')
+    base.start(); base.advance()
+    other = Experiment(dict(name='bad', rv_list=[0], grid='grd_vdd2025', reference_from='calm2',
+                            wind=dict(U=5.0)), site=base.site, scheduler=sched, stat_loader=FakeStat(), link_exe=False)
+    with pytest.raises(RuntimeError, match='grid'):
+        other.start()
+
+
+def test_linear_wind_profile():
+    from samheat.sounding import wind_profile
+    u, v = wind_profile(np.array([0., 500., 1000., 3000.]), dict(profile='linear', U=10., z_top=1000.))
+    assert np.allclose(u, [0, 5, 10, 10]) and np.allclose(v, 0)
+    assert np.allclose(wind_profile(np.array([0., 1.]), None)[0], 0)

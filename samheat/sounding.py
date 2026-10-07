@@ -48,3 +48,29 @@ def snd_from_stat(stat, avg_days, psfc, u=None, v=None):
     zeros = np.zeros_like(z)
     return dict(z=z, p=p, tp=T * (1000. / p) ** (R_SND / CP_SND), q=q,
                 u=zeros if u is None else u, v=zeros if v is None else v, psfc=psfc)
+
+
+def wind_profile(z, wind):
+    """Target (u, v) [m/s] at heights z [m] for a WIND setting.
+    wind: None or {} -> calm; dict(profile='uniform', U=5., V=0.) -> the same wind at every level;
+    dict(profile='linear', U=10., V=0., z_top=1000., u_bottom=0.) -> u_bottom at z = 0 rising
+    linearly to U at z_top and U above (low-level shear, Muller 2013 style; V scaled the same way)."""
+    z = np.asarray(z, float)
+    if not wind:
+        return np.zeros_like(z), np.zeros_like(z)
+    U, V = float(wind.get('U', 0.)), float(wind.get('V', 0.))
+    kind = wind.get('profile', 'uniform')
+    if kind == 'uniform':
+        return np.full_like(z, U), np.full_like(z, V)
+    if kind == 'linear':
+        f = np.clip(z / float(wind.get('z_top', 1000.)), 0., 1.)
+        ub = float(wind.get('u_bottom', 0.))
+        return ub + (U - ub) * f, V * f
+    raise ValueError(f"unknown wind profile {kind!r}: use 'uniform' or 'linear'")
+
+
+def with_wind(snd, wind):
+    """Copy of a sounding dict whose u, v columns are the WIND target (SAM nudges toward them)."""
+    out = dict(snd)
+    out['u'], out['v'] = wind_profile(snd['z'], wind)
+    return out
