@@ -88,6 +88,10 @@ def rv_key(rv):
 
 class Experiment:
     def __init__(self, cfg=None, site=SITE, scheduler=None, stat_loader=None, link_exe=True):
+        unknown = sorted(set(cfg or {}) - set(DEFAULTS))
+        if unknown:          # never ignore a lever silently (typo, or a notebook newer than this code)
+            raise ValueError(f'unknown experiment settings {unknown}; known: {sorted(DEFAULTS)}. '
+                             'If the notebook is newer than the code: git pull, then restart the kernel.')
         self.cfg = _deep_update(DEFAULTS, cfg)
         self.cfg['stage1']['ts_offset'] = {float(k): v for k, v in self.cfg['stage1']['ts_offset'].items()}
         c = self.cfg

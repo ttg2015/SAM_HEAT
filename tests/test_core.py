@@ -223,3 +223,8 @@ def test_linear_wind_profile():
     u, v = wind_profile(np.array([0., 500., 1000., 3000.]), dict(profile='linear', U=10., z_top=1000.))
     assert np.allclose(u, [0, 5, 10, 10]) and np.allclose(v, 0)
     assert np.allclose(wind_profile(np.array([0., 1.]), None)[0], 0)
+
+
+def test_unknown_setting_is_refused(tmp_path):
+    with pytest.raises(ValueError, match='unknown experiment settings'):
+        make(tmp_path, refrence_from='calm')                        # typo
