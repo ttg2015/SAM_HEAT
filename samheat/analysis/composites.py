@@ -192,6 +192,18 @@ def near_surface_rh(run_dir, tmin=None, tmax=None):
         return float('nan')
 
 
+def stat_pressure(run_dir, z, tmin=None, tmax=None):
+    """Mean pressure profile p(z) [hPa] from a run's STAT file over [tmin, tmax] (NaN if unavailable).
+    Needed for stability diagnostics; the composites themselves only carry PP (perturbation)."""
+    try:
+        from ..io.stat import open_stat
+        st = open_stat(run_dir)
+        prof = st['p'].sel(time=slice(tmin, tmax)).mean('time') if 'time' in st['p'].dims else st['p']
+        return np.interp(z, st['z'].values, prof.values)
+    except Exception:
+        return np.full(len(z), np.nan)
+
+
 def composite_experiment(experiment, rv_list, classify, mask_name='mask', mask_params=None,
                          source='auto', tmin=None, tmax=None, include_all=True, cache=True,
                          force=False, run_name='stage2_rv{rv:g}'):
@@ -221,7 +233,10 @@ def composite_experiment(experiment, rv_list, classify, mask_name='mask', mask_p
                 c.attrs.update(mask_name=mask_name, mask_key=key, mask_params=repr(mask_params or {}),
                                source=src)
                 c.to_netcdf(f)
+        if 'p' not in c.coords:
+            c = c.assign_coords(p=('z', stat_pressure(rdir, c.z.values, c.attrs.get('t_start'), c.attrs.get('t_end')),
+                                   dict(units='hPa', long_name='mean pressure (STAT)')))
         runs.append(c.expand_dims(rv=[float(rv)]))
-    out = xr.concat(runs, dim='rv', coords=['count', 'fraction', 'RH'], combine_attrs='drop_conflicts')
+    out = xr.concat(runs, dim='rv', coords=['count', 'fraction', 'RH', 'p'], combine_attrs='drop_conflicts')
     out.attrs.update(mask_name=mask_name, mask_key=key, mask_params=repr(mask_params or {}))
     return out
