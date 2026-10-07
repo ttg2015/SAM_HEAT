@@ -89,6 +89,12 @@ def _snapshot_p(s, nz):
 
 def composite(data, classify, params=None, include_all=True, progress=50):
     """Composite profiles of one run. data: Dataset (time, z, y, x) with p; classify(f, z, **params): see module.
+
+    A mask may be 2D (y, x): the same columns at every level (e.g. 'W > X near the surface'), or
+    3D (z, y, x): chosen level by level (e.g. 'cloudy here': QN > threshold at that height).
+    Output: Dataset (group, z) of means over the selected points, with coordinates
+        count_z, fraction_z (group, z)  number / fraction of points used at each level
+        count, fraction     (group)     their mean over levels (= the column count / fraction for 2D masks)
     include_all adds group 'all' (domain mean), handy for anomalies (group - all)."""
     fields = [v for v in data.data_vars if data[v].dims == ('time', 'z', 'y', 'x')]
     z = data['z'].values.astype(float)
@@ -98,28 +104,37 @@ def composite(data, classify, params=None, include_all=True, progress=50):
         s = data.isel(time=t).load()
         f = {v: s[v].values.astype(np.float64) for v in fields}
         f.update(derived_fields(f, _snapshot_p(s, nz), z))
+        shape = f['W'].shape
         masks = dict(classify(f, z, **(params or {})))
         if include_all:
-            masks['all'] = np.ones(f['W'].shape[1:], bool)
+            masks['all'] = np.ones(shape[1:], bool)
         if groups is None:
             groups = list(masks)
         elif list(masks) != groups:
             raise ValueError(f'mask returned groups {list(masks)} at snapshot {t}, expected {groups}')
         for g, m in masks.items():
             m = np.asarray(m, bool)
-            count[g] = count.get(g, 0) + int(m.sum())
-            for v, a in f.items():
-                sums[(g, v)] = sums.get((g, v), 0.) + a[:, m].sum(axis=1)
+            if m.shape == shape[1:]:                          # column mask: fast path
+                count[g] = count.get(g, 0) + np.full(nz, m.sum())
+                for v, a in f.items():
+                    sums[(g, v)] = sums.get((g, v), 0.) + a[:, m].sum(axis=1)
+            elif m.shape == shape:                            # level-by-level mask
+                count[g] = count.get(g, 0) + m.sum(axis=(1, 2))
+                for v, a in f.items():
+                    sums[(g, v)] = sums.get((g, v), 0.) + np.where(m, a, 0.).sum(axis=(1, 2))
+            else:
+                raise ValueError(f'mask {g!r} has shape {m.shape}; expected {shape[1:]} (columns) or {shape} (levels)')
         if progress and (t % progress == 0 or t == nt - 1):
             print(f'    snapshot {t + 1}/{nt}')
     names = list(dict.fromkeys(v for _, v in sums))
-    ncol = data.sizes['y'] * data.sizes['x'] * nt
+    npts = data.sizes['y'] * data.sizes['x'] * nt
+    cz = np.array([count[g] for g in groups], float)                       # (group, z)
     with np.errstate(invalid='ignore', divide='ignore'):
         out = xr.Dataset(
-            {v: (('group', 'z'), np.array([sums[(g, v)] / count[g] if count[g] else np.full(nz, np.nan)
-                                          for g in groups])) for v in names},
-            coords=dict(group=groups, z=z, count=('group', [count[g] for g in groups]),
-                        fraction=('group', [count[g] / ncol for g in groups])))
+            {v: (('group', 'z'), np.array([sums[(g, v)] for g in groups]) / cz) for v in names},
+            coords=dict(group=groups, z=z,
+                        count_z=(('group', 'z'), cz), fraction_z=(('group', 'z'), cz / npts),
+                        count=('group', cz.mean(axis=1)), fraction=('group', cz.mean(axis=1) / npts)))
     for v in names:
         if v in data:
             out[v].attrs.update(data[v].attrs)
@@ -234,10 +249,13 @@ def composite_experiment(experiment, rv_list, classify, mask_name='mask', mask_p
                 c.attrs.update(mask_name=mask_name, mask_key=key, mask_params=repr(mask_params or {}),
                                source=src)
                 c.to_netcdf(f)
+        if 'fraction_z' not in c.coords:          # cached before level-wise masks existed (column masks)
+            c = c.assign_coords(count_z=(('group', 'z'), np.repeat(c['count'].values[:, None], c.sizes['z'], 1)),
+                                fraction_z=(('group', 'z'), np.repeat(c['fraction'].values[:, None], c.sizes['z'], 1)))
         if 'p' not in c.coords:
             c = c.assign_coords(p=('z', stat_pressure(rdir, c.z.values, c.attrs.get('t_start'), c.attrs.get('t_end')),
                                    dict(units='hPa', long_name='mean pressure (STAT)')))
         runs.append(c.expand_dims(rv=[float(rv)]))
-    out = xr.concat(runs, dim='rv', coords=['count', 'fraction', 'RH', 'p'], combine_attrs='drop_conflicts')
+    out = xr.concat(runs, dim='rv', coords=['count', 'fraction', 'count_z', 'fraction_z', 'RH', 'p'], combine_attrs='drop_conflicts')
     out.attrs.update(mask_name=mask_name, mask_key=key, mask_params=repr(mask_params or {}))
     return out
