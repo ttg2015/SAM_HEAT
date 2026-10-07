@@ -206,15 +206,16 @@ def stat_pressure(run_dir, z, tmin=None, tmax=None):
 
 def composite_experiment(experiment, rv_list, classify, mask_name='mask', mask_params=None,
                          source='auto', tmin=None, tmax=None, include_all=True, cache=True,
-                         force=False, run_name='stage2_rv{rv:g}'):
+                         force=False, run_name='stage2_rv{rv:g}', key_extra=''):
     """composite() for every r_v of an experiment -> Dataset (rv, group, z) with coords
     fraction(rv, group), count(rv, group) and RH(rv). Each run is cached in
     <experiment>/analysis_cache/composite_<mask_name>_<key>_rv<rv>.nc; the key changes when the
     mask's code or parameters, the time window or include_all change (not with the source:
     .bin3D and converted .nc give identical results)."""
     experiment = Path(experiment)
+    # key_extra: e.g. the source of helper functions the mask calls, so editing them also refreshes the cache
     key = mask_key(classify, mask_params, tmin=tmin, tmax=tmax, include_all=include_all,
-                   derived=DERIVED_VERSION)          # not the source: bin and nc are bit-identical
+                   derived=DERIVED_VERSION, extra=key_extra)          # not the source: bin and nc are bit-identical
     cdir = experiment / 'analysis_cache'
     runs = []
     for rv in rv_list:
