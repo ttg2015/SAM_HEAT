@@ -23,7 +23,7 @@ from . import masks                                     # noqa: F401  (re-export
 from .composites import SAT_PAIRS, composite_experiment, fit_xlim, near_surface_rh
 from ..paths import SITE
 
-DEFAULT_XLIMS = {'MSE': (320, 350), 'MSE_frozen': (320, 350), 'THETA_E': (320, 350)}
+DEFAULT_XLIMS = {'MSE': (320, 350), 'MSE_frozen': (320, 350), 'THETA_E': (320, 350), 'MSE_SAM': (320, 350)}
 
 
 def experiment_dir(experiment):
@@ -157,3 +157,57 @@ def plot_grid(D, variables, ncol=4, **kw):
         ax.set_visible(False)
     fig.tight_layout()
     return fig
+
+
+def plot_cloud_env(C, var='MSE', rv=None, cloud='cloud', env='clear', ax=None, zmax=16000, xlim=(320, 350)):
+    """The classic RCE picture in one panel, for each run (colour = RH):
+        solid   `var` of cloudy air            (group `cloud`)
+        dashed  `var` of the whole domain      (group 'all')
+        dotted  saturated `var` (h*) of the environment (group `env`, e.g. clear air)
+    Needs a composite from a mask with those groups, e.g. load(..., masks.cloud)."""
+    from matplotlib.lines import Line2D
+    ax = ax or plt.subplots(figsize=(5.5, 6))[1]
+    sat = SAT_PAIRS[var]
+    rvs = C.rv.values if rv is None else np.atleast_1d(rv)
+    col = rh_colors(C)
+    for r in rvs:
+        c = col.get(r, 'k')
+        ax.plot(C[var].sel(rv=r, group=cloud), C.z / 1000, c=c, lw=1.8)
+        ax.plot(C[var].sel(rv=r, group='all'), C.z / 1000, c=c, lw=1.2, ls='--')
+        ax.plot(C[sat].sel(rv=r, group=env), C.z / 1000, c=c, lw=1.2, ls=':')
+    handles = [Line2D([], [], c='k', lw=1.8, label=f'{var}, {cloud}'),
+               Line2D([], [], c='k', ls='--', label=f'{var}, domain mean'),
+               Line2D([], [], c='k', ls=':', label=f'{sat}, {env} (h*)')]
+    handles += [Line2D([], [], c=col[r], lw=3, label=_label(C, rv=r)) for r in rvs]
+    ax.legend(handles=handles, fontsize=7)
+    if xlim:
+        ax.set_xlim(*xlim)
+    if zmax:
+        ax.set_ylim(0, zmax / 1000)
+    ax.set_xlabel(f'{var} [kJ/kg]'); ax.set_ylabel('z (km)')
+    return ax
+
+
+def compare_cloud_with_stat(C, S, zmax=10000., cloud='cloud'):
+    """How well a 3D cloud composite (mask masks.cloud, SAM's criterion) reproduces SAM's own STAT
+    cloud statistics, per run, below zmax:
+        cloud fraction  fraction_z[cloud]  vs  STAT CLD
+        cloud MSE       MSE_SAM[cloud]     vs  1.004 * STAT MSECLD   (SAM writes MSE in K = h/c_p)
+    Returns a DataFrame of max / rms differences. Expect small, not zero: the composites use
+    3-hourly snapshots, STAT averages every statistics sample in each hour."""
+    import pandas as pd
+    rows = []
+    for r in C.rv.values:
+        zs = C.z.values[C.z.values <= zmax]
+        fr = C.fraction_z.sel(rv=r, group=cloud).sel(z=zs)
+        st = S.sel(rv=r).interp(z=zs)
+        dfrac = fr.values - st['CLD'].values
+        h3d = C['MSE_SAM'].sel(rv=r, group=cloud).sel(z=zs).values
+        hst = 1.004 * st['MSECLD'].values
+        ok = (st['CLD'].values > 0) & np.isfinite(h3d)
+        dh = h3d[ok] - hst[ok]
+        rows.append(dict(rv=r, cloud_frac_mean_3D=float(np.nanmean(fr)), cloud_frac_mean_STAT=float(np.nanmean(st['CLD'])),
+                         frac_max_abs_diff=float(np.nanmax(np.abs(dfrac))), frac_rms_diff=float(np.sqrt(np.nanmean(dfrac ** 2))),
+                         mse_max_abs_diff_kJkg=float(np.max(np.abs(dh))) if dh.size else np.nan,
+                         mse_rms_diff_kJkg=float(np.sqrt(np.mean(dh ** 2))) if dh.size else np.nan))
+    return pd.DataFrame(rows).set_index('rv').round(4)

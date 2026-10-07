@@ -120,13 +120,14 @@ def parcel_h(f, z, k_src=0, cape_min=200., cin_max=20., zmax=16000.):
 
 # ------------------------------------------------------------------ level masks ---------------
 def sam_cloud_threshold(f, z):
-    """SAM's own 'cloudy' threshold per level, in g/kg (statistics.f90, CLD conditional average):
-    QN > min(0.01 g/kg, 1 % of the saturation mixing ratio of the level's mean state). q* is taken
-    from MSE_SAT (SAM's liquid/ice qsat at p + PP); SAM uses qsat over water, so the upper-
-    troposphere threshold can differ slightly."""
-    zz = np.asarray(z, float)[:, None, None]
-    qs = (f['MSE_SAT'] - 1.005 * f['TABS'] - 9.8 / 1000 * zz) / 2.5     # g/kg (inverse of MSE_SAT's definition)
-    return np.minimum(0.01, 0.01 * qs.mean(axis=(1, 2)))[:, None, None]
+    """SAM's own 'cloudy' threshold per level in g/kg, exactly as statistics.f90 (CLD conditional):
+    QN > min(1e-5 kg/kg, 0.01 * qsatw(tabs0(k), pres(k))), with qsatw SAM's saturation mixing ratio
+    over water (sat.f90; same polynomial in thermo_SAM.qsatw) at the level's horizontal-mean
+    temperature and pressure. QN = cloud liquid + ice (SAM's qcl + qci)."""
+    from .thermo_SAM import qsatw
+    Tm = f['TABS'].mean(axis=(1, 2))
+    pm = f['P'].mean(axis=(1, 2)) if 'P' in f else np.full(len(Tm), 1000.)
+    return np.minimum(0.01, 0.01 * qsatw(Tm, pm))[:, None, None]          # qsatw returns g/kg
 
 
 def cloud(f, z, qn_min=None):
@@ -162,6 +163,67 @@ def sam_cores(f, z, w_min=1.0, include_qp=True):
     return dict(updraft_core=up, downdraft_core=dn, other=~(up | dn))
 
 
+# ------------------------------------------------------------------ precipitation -------------
+QP_RAIN = 0.1      # g/kg = 1e-4 kg/kg: SAM's only precipitation threshold (statistics.f90, CDN / HYDRO)
+
+
+def rain(f, z, qp_min=QP_RAIN):
+    """At each level: precipitating hydrometeors present (QP > qp_min g/kg) vs not."""
+    r = f['QP'] > qp_min
+    return dict(rain=r, no_rain=~r)
+
+
+def hydrometeors(f, z, qn_min=None, qp_min=QP_RAIN):
+    """At each level, SAM's exclusive HYDRO classes: cloud (SAM's criterion), else rain only
+    (QP > qp_min), else clear. 'rain_only' is e.g. rain falling below cloud base (re-evaporation)."""
+    thr = sam_cloud_threshold(f, z) if qn_min is None else qn_min
+    c = f['QN'] > thr
+    r = (f['QP'] > qp_min) & ~c
+    return dict(cloud=c, rain_only=r, clear=~(c | r))
+
+
+def precipitating_cloud(f, z, qn_min=None, qp_min=QP_RAIN):
+    """At each level: cloud with precipitation (cloudy and QP > qp_min), non-precipitating cloud, clear."""
+    thr = sam_cloud_threshold(f, z) if qn_min is None else qn_min
+    c = f['QN'] > thr
+    r = f['QP'] > qp_min
+    return dict(precipitating_cloud=c & r, non_precipitating_cloud=c & ~r, clear=~c)
+
+
+def raining_column(f, z, qp_min=QP_RAIN, zmax=1000.):
+    """Columns with rain near the surface: max QP below zmax [m] > qp_min. A proxy for surface rain
+    from the 3D fields (the 2D 'Prec' is in separate files); 0.1 g/kg is roughly a few mm/h,
+    so very light rain is missed."""
+    q = f['QP'][np.asarray(z) <= zmax].max(axis=0)
+    return dict(raining=q > qp_min, dry=q <= qp_min)
+
+
+def heavy_rain_column(f, z, q=1.0, zmax=1000.):
+    """Columns with the heaviest near-surface rain in this snapshot: top q % of max QP below zmax
+    (a 3D proxy for the precipitation-extreme columns of van der Drift & O'Gorman)."""
+    qp = f['QP'][np.asarray(z) <= zmax].max(axis=0)
+    hi = np.percentile(qp, 100 - q)
+    heavy = (qp >= hi) & (qp > 0)
+    return dict(heavy_rain=heavy, other=~heavy)
+
+
+def cloud_water_path(f, z):
+    """Cloud (QN) water path [kg/m^2] per column: sum rho QN dz, rho = p/(R_d T_v) from P, TABS, QV."""
+    rho = 100. * f['P'] / (287.04 * f['TABS'] * (1 + 0.608 * f['QV'] / 1e3))
+    dz = np.gradient(np.asarray(z, float))[:, None, None]
+    return (rho * f['QN'] / 1e3 * dz).sum(axis=0)
+
+
+def cloudy_column(f, z, cwp_min=0.02):
+    """Columns whose cloud water path exceeds cwp_min kg/m^2 (SAM's own column-cloud threshold,
+    cwpmax = 0.02 in statistics.f90) vs clear-sky columns."""
+    c = cloud_water_path(f, z) > cwp_min
+    return dict(cloudy_column=c, clear_column=~c)
+
+
 COLUMN_MASKS = dict(symmetric=symmetric, sigma=sigma, percentile=percentile, layer_mean=layer_mean,
-                    buoyant=buoyant, buoyancy_only=buoyancy_only, parcel_h=parcel_h)
-LEVEL_MASKS = dict(cloud=cloud, cloud_updraft=cloud_updraft, core=core, sam_cores=sam_cores)
+                    buoyant=buoyant, buoyancy_only=buoyancy_only, parcel_h=parcel_h,
+                    raining_column=raining_column, heavy_rain_column=heavy_rain_column,
+                    cloudy_column=cloudy_column)
+LEVEL_MASKS = dict(cloud=cloud, cloud_updraft=cloud_updraft, core=core, sam_cores=sam_cores,
+                   rain=rain, hydrometeors=hydrometeors, precipitating_cloud=precipitating_cloud)

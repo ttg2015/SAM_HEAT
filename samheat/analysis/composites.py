@@ -20,9 +20,9 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-DERIVED_VERSION = 2      # bump when derived_fields changes, so cached composites are recomputed
+DERIVED_VERSION = 3      # bump when derived_fields changes, so cached composites are recomputed
 # saturated counterparts drawn as dashed lines next to their parent quantity
-SAT_PAIRS = {'MSE': 'MSE_SAT', 'MSE_frozen': 'MSE_frozen_SAT', 'THETA_E': 'THETA_ES'}
+SAT_PAIRS = {'MSE': 'MSE_SAT', 'MSE_frozen': 'MSE_frozen_SAT', 'THETA_E': 'THETA_ES', 'MSE_SAM': 'MSE_SAM_SAT'}
 
 # SAM constants (SAM_SRC/params.f90) and the liquid/ice partition of MICRO_SAM1MOM/micro_params.f90
 CP, G, LC, LF = 1004., 9.81, 2.5104e6, 0.3336e6
@@ -41,6 +41,9 @@ def derived_fields(f, p, z):
     q_ice = (ice_n * qn + ice_p * qp) / 1000.                          # kg/kg
     q_liq = ((1 - ice_n) * qn + (1 - ice_p) * qp) / 1000.
     out = {
+        # SAM's own MSE (statistics.f90, the STAT MSE / MSECLD in K times c_p/1000), kJ/kg:
+        # (c_p T + g z + L_c qv) / 1000 with SAM's constants -> compare 1:1 with 1.004 * STAT MSECLD
+        'MSE_SAM': (CP * T + G * zz + LC * qv / 1000.) / 1000.,
         # simple MSE (kJ/kg), as defined by the user: 1.005 T + 2.5 qv + g z / 1000
         'MSE': 1.005 * T + 2.5 * qv + (9.8 / 1000) * zz,
         # frozen MSE (kJ/kg): conserved under condensation, evaporation and freezing
@@ -50,6 +53,7 @@ def derived_fields(f, p, z):
     }
     # equivalent potential temperature (K), Bolton (1980) eqs. 22 and 39, at p + PP
     ptot = np.asarray(p, float)[:, None, None] + f.get('PP', 0.) / 100.
+    out['P'] = ptot * np.ones_like(T)                                   # total pressure, hPa
     e = ptot * (qv / 1000.) / (0.622 + qv / 1000.)
     TL = 2840. / (3.5 * np.log(T) - np.log(np.maximum(e, 1e-6)) - 4.805) + 55.
     out['THETA_E'] = _bolton_theta_e(T, ptot, qv, TL)
@@ -59,6 +63,7 @@ def derived_fields(f, p, z):
     qs = qsat(T, ptot)                                                  # g/kg
     out['MSE_SAT'] = 1.005 * T + 2.5 * qs + (9.8 / 1000) * zz
     out['MSE_frozen_SAT'] = (CP * T + G * zz + LC * qs / 1000.) / 1000.
+    out['MSE_SAM_SAT'] = out['MSE_frozen_SAT']                          # same formula: SAM's MSE at saturation
     out['THETA_ES'] = _bolton_theta_e(T, ptot, qs, T)                   # saturated: T_L = T
     return out
 

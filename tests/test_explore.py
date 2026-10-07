@@ -72,3 +72,75 @@ def test_load_and_plots(tmp_path, monkeypatch):
     fig = X.plot_grid(D, ['W', 'QN', 'MSE', 'THETA_E', 'TABS'], group='clear')
     assert sum(a.get_visible() for a in fig.axes) == 5
     plt.close('all')
+
+
+def _sam_stat_cld(ds):
+    """Independent re-implementation of SAM's statistics.f90 CLD conditional average (loops, kg/kg)."""
+    from samheat.analysis.thermo_SAM import qsatw
+    nt, nz = ds.sizes['time'], ds.sizes['z']
+    frac, mse = np.zeros((nt, nz)), np.full((nt, nz), np.nan)
+    p = np.asarray(ds['p'].values, float).reshape(-1, nz)[0]
+    for t in range(nt):
+        s = ds.isel(time=t)
+        for k in range(nz):
+            T = s.TABS.isel(z=k).values.astype(float)
+            q = s.QV.isel(z=k).values / 1e3
+            qn = s.QN.isel(z=k).values / 1e3
+            coef = min(1e-5, 0.01 * qsatw(T.mean(), p[k]) / 1e3)
+            m = qn > coef
+            frac[t, k] = m.mean()
+            if m.any():
+                h_K = T + 9.81 * float(s.z[k]) / 1004. + 2.5104e6 / 1004. * q
+                mse[t, k] = h_K[m].mean()
+    return frac, mse
+
+
+def test_cloud_mask_reproduces_sam_stat_definition():
+    ds = _with_clouds(seed=4)
+    ds = ds.assign(QN=ds.QN * 0.03)          # 0.015 g/kg clouds: straddles SAM's threshold aloft
+    ds = ds.assign(PP=ds.PP * 0)              # SAM's threshold uses base-state pressure
+    c = C.composite(ds, M.cloud, progress=0)
+    frac, mse = _sam_stat_cld(ds)
+    np.testing.assert_allclose(c.fraction_z.sel(group='cloud'), frac.mean(0), atol=1e-12)
+    # SAM averages per sample then over samples; we pool points: equal when weighted by counts
+    w = frac / frac.sum(0, keepdims=True)
+    pooled = np.nansum(np.where(np.isnan(mse), 0, mse) * w, axis=0)
+    has = frac.sum(0) > 0
+    np.testing.assert_allclose(c.MSE_SAM.sel(group='cloud').values[has], 1.004 * pooled[has], rtol=1e-7)   # float32 data
+
+
+def test_plot_cloud_env_and_compare(tmp_path, monkeypatch):
+    from samheat.paths import SITE
+    monkeypatch.setattr(SITE, 'work_root', tmp_path)
+    rng = np.random.default_rng(3)
+    for rv in (0, 500):
+        out = tmp_path / 'e' / f'stage2_rv{rv}' / 'OUT_3D'
+        out.mkdir(parents=True)
+        for i in range(2):
+            f = _fields(rng)
+            f['QN'] = np.where(rng.random(f['QN'].shape) < .2, .5, 0.).astype('f4')
+            write_bin3d(out / f'x_{i:010d}.bin3D', 30 + i / 8, Z, P, f)
+    D = X.load('e', [0, 500], M.cloud, tmin=None, tmax=None)
+    ax = X.plot_cloud_env(D, 'MSE')
+    assert len(ax.lines) == 6
+    S = xr.Dataset(dict(CLD=(('rv', 'z'), D.fraction_z.sel(group='cloud').values),
+                        MSECLD=(('rv', 'z'), D.MSE_SAM.sel(group='cloud').values / 1.004)),
+                   coords=dict(rv=D.rv.values, z=Z))
+    tab = X.compare_cloud_with_stat(D, S)
+    assert (tab.frac_max_abs_diff < 1e-12).all() and (tab.mse_rms_diff_kJkg < 1e-9).all()
+    plt.close('all')
+
+
+def test_cloud_frames_both_renderers(tmp_path):
+    from samheat.analysis.clouds3d import cloud_frame
+    rng = np.random.default_rng(1)
+    run = tmp_path / 'stage2_rv0' / 'OUT_3D'
+    run.mkdir(parents=True)
+    f = _fields(rng)
+    f['QN'] = np.where(rng.random(f['QN'].shape) < .2, .5, 0.).astype('f4')
+    write_bin3d(run / 'x_0000000001.bin3D', 30., Z, P, f)
+    out = cloud_frame(run.parent, out=tmp_path / 'm.png', renderer='matplotlib', coarsen=1)
+    assert out.exists() and out.stat().st_size > 1000
+    pytest.importorskip('pyvista')
+    out = cloud_frame(run.parent, out=tmp_path / 'p.png', renderer='pyvista')
+    assert out.exists() and out.stat().st_size > 1000
