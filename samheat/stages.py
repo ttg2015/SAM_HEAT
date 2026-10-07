@@ -56,6 +56,14 @@ MUTABLE = {'auto_advance', 'dry_run', 'max_submits', 'rv_list'}
 TERMINAL = ('done', 'failed', 'corrupted')
 
 
+def _without_guesses(key, value):
+    """Stage-1 first guesses of Ts (stage1.ts_offset) change only where Stage 1 starts, not the
+    converged state, so they may be edited mid-experiment (e.g. to add very dry r_v values)."""
+    if key == 'stage1' and isinstance(value, dict):
+        return {k: v for k, v in value.items() if k != 'ts_offset'}
+    return value
+
+
 def _deep_update(base, new):
     out = deepcopy(base)
     for k, v in (new or {}).items():
@@ -100,9 +108,9 @@ class Experiment:
         cur = json.loads(json.dumps(self.cfg, default=str))
         if f.exists():
             old = json.loads(f.read_text())
+            comparable = lambda d, k: _without_guesses(k, d.get(k, json.loads(json.dumps(DEFAULTS.get(k), default=str))))
             diff = sorted(k for k in set(old) | set(cur)
-                          if k not in MUTABLE and k != 'name'
-                          and old.get(k, DEFAULTS.get(k)) != cur.get(k, DEFAULTS.get(k)))
+                          if k not in MUTABLE and k != 'name' and comparable(old, k) != comparable(cur, k))
             if diff:
                 raise RuntimeError(
                     f'{self.root.name} already exists with different settings for {diff}.\n'

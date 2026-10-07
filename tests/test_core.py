@@ -165,3 +165,17 @@ def test_grid_lever_and_old_experiments(tmp_path):
     old.advance()
     with pytest.raises(FileNotFoundError):
         make(tmp_path, grid='no_such_grid')
+
+
+def test_ts_guesses_and_rv_list_may_change_mid_experiment(tmp_path):
+    exp, sched = make(tmp_path, name='grow')
+    exp.start(); exp.advance(); exp.advance(); exp.advance()          # rv0, rv500 done
+    more = dict(rv_list=[0, 500, 100000], name='grow',
+                stage1=dict(ts_offset={0: 0.0, 500: 3.8, 100000: 14.7}))
+    exp2 = Experiment(more, site=exp.site, scheduler=sched, stat_loader=FakeStat(), link_exe=False)
+    exp2.advance()                                                    # adds rv100000 and launches it
+    e = exp2.ledger.load()['rv100000']
+    assert e['stage'] == 1 and e['ts'] == pytest.approx(314.7)
+    with pytest.raises(RuntimeError, match='new EXPERIMENT name'):   # real physics still locked
+        Experiment(dict(more, stage1=dict(tau_sst=1e5)), site=exp.site, scheduler=sched,
+                   stat_loader=FakeStat(), link_exe=False).advance()
